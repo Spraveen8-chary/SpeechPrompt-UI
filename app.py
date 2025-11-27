@@ -19,7 +19,6 @@ def home():
         prompt_text = request.form.get("prompt_text") or ""
         output_type = request.form.get("output_type") or "asr"
 
-        # 1) main audio: normal upload or live recording
         file = request.files.get("audio_file")
         live_filename = request.form.get("live_filename")
 
@@ -28,11 +27,9 @@ def home():
         elif live_filename:
             audio_filename = live_filename
 
-        # 2) prompt audio (optional, for future ASR on prompt)
         prompt_audio = request.form.get("prompt_audio")
-        _ = prompt_audio  # not used yet, kept for future
+        _ = prompt_audio  
 
-        # TODO: replace with real model calls
         if output_type == "asr":
             result_text = f"[ASR] Processed: {prompt_text}"
         elif output_type == "classification":
@@ -73,3 +70,4 @@ def _save_file(file_storage):
 
 if __name__ == "__main__":
     app.run(debug=True)
+
