@@ -12,7 +12,7 @@ from langchain_community.vectorstores import Chroma
 import docx2txt
 
 CHROMA_PATH = "chroma"
-DATA_PATH = "data"
+DATA_PATH = "data/docs"
 
 ALLOWED_DOC_EXT = {".pdf", ".doc", ".docx", ".txt", ".md"}
 

@@ -4,34 +4,76 @@ from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_from_directory, session
 
 import whisper
-import ollama
 from gtts import gTTS
+from model import run_speechbrain
+from query_data import query_rag  # <-- your RAG engine
+import ffmpeg
+
+from get_embedding_function import get_embedding_function
+
+# Load ONCE at app startup
+EMBEDDINGS = get_embedding_function()
 
 # ==================================================
-# SETUP LOGGING
+# DIRECTORY STRUCTURE
+# ==================================================
+BASE_DIR = os.path.abspath(os.path.dirname(__file__)).replace("\\", "/")
+
+
+UPLOAD_AUDIO_DIR = os.path.join(BASE_DIR, "uploads", "audio")
+UPLOAD_DOC_DIR = os.path.join(BASE_DIR, "data", "docs")
+OUTPUT_WHISPER_DIR = os.path.join(BASE_DIR, "outputs", "audio", "whisper")
+CONVERTED_AUDIO_DIR = os.path.join(BASE_DIR, "uploads", "audio", "converted")
+LOG_DIR = os.path.join(BASE_DIR, "logs")
+
+# Create directories
+os.makedirs(UPLOAD_AUDIO_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DOC_DIR, exist_ok=True)
+os.makedirs(OUTPUT_WHISPER_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(CONVERTED_AUDIO_DIR, exist_ok=True)
+
+
+# ==================================================
+# LOGGING TO FILE ONLY
 # ==================================================
 logging.basicConfig(
+    filename=os.path.join(LOG_DIR, "app.log"),
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+    format="%(asctime)s [APP] %(levelname)s: %(message)s",
 )
-log = logging.getLogger(__name__)
+log = logging.getLogger("APP")
+
 
 # ==================================================
 # LOAD WHISPER
 # ==================================================
-log.info("Loading Whisper model: small (fast & accurate)")
+log.info("Loading Whisper model: small")
 whisper_model = whisper.load_model("small")
 
+def convert_to_wav(original_path):
+    """Converts any format to 16kHz WAV."""
+    base = os.path.splitext(os.path.basename(original_path))[0]
+    out_path = os.path.join(CONVERTED_AUDIO_DIR, base + ".wav")
+
+    try:
+        (
+            ffmpeg
+            .input(original_path)
+            .output(out_path, ac=1, ar=16000, format="wav")
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        return out_path
+    except Exception as e:
+        print("Conversion error:", e)
+        return None
 
 # ==================================================
-# FLASK SETUP
+# FLASK APP SETUP
 # ==================================================
 app = Flask(__name__)
 app.secret_key = "speechprompt-key"
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ALLOWED_DOC_EXT = {".pdf", ".doc", ".docx", ".txt", ".md"}
 MAX_DOCS = 5
@@ -40,75 +82,54 @@ MAX_DOCS = 5
 # ==================================================
 # SAVE FILES
 # ==================================================
-def _save_file(file):
+def _save_audio_file(file):
+    """Save uploaded audio to uploads/audio/"""
     ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
     _, ext = os.path.splitext(file.filename)
-    ext = ext or ".bin"
+    ext = ext or ".wav"
     filename = f"{ts}{ext}"
 
-    filepath = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(filepath)
+    save_path = os.path.join(UPLOAD_AUDIO_DIR, filename)
+    file.save(save_path)
 
-    log.info(f"[FILE SAVED] {filename}")
+    log.info(f"[UPLOAD] Audio saved: {filename}")
+    return filename
+
+
+def _save_doc_file(file):
+    """Save uploaded docs to data/docs/"""
+    ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    _, ext = os.path.splitext(file.filename)
+    filename = f"{ts}{ext}"
+
+    save_path = os.path.join(UPLOAD_DOC_DIR, filename)
+    file.save(save_path)
+
+    log.info(f"[UPLOAD] Document saved: {filename}")
     return filename
 
 
 # ==================================================
-# TRANSCRIPTION
+# WHISPER TRANSCRIPTION
 # ==================================================
-def transcribe_audio(path):
-    log.info(f"[ASR] Starting transcription → {path}")
-
-    start = datetime.utcnow()
-    try:
-        result = whisper_model.transcribe(path)
-
-        lang = result.get("language", "unknown")
-        text = result.get("text", "")
-        duration = (datetime.utcnow() - start).total_seconds()
-
-        log.info(f"[ASR DONE] lang={lang}, chars={len(text)}, time={duration:.2f}s")
-        log.debug(f"[ASR TEXT] {text[:200]}...")
-
-        return lang, text
-
-    except Exception as e:
-        log.error(f"[ASR ERROR] {e}")
-        return "error", f"[ASR Error] {e}"
+def transcribe_whisper(path):
+    result = whisper_model.transcribe(path)
+    text = result.get("text", "").strip()
+    lang = result.get("language", "unknown")
+    return lang, text
 
 
 # ==================================================
-# LLM CALL
+# TTS (for Whisper + Mistral output)
 # ==================================================
-def mistral(messages):
-    try:
-        log.info(f"[LLM] Calling Mistral → prompt tokens={len(messages)}")
-        log.debug(f"[LLM INPUT] {messages}")
-
-        resp = ollama.chat(model="mistral:latest", messages=messages)
-        output = resp["message"]["content"]
-
-        log.info(f"[LLM DONE] chars={len(output)}")
-        log.debug(f"[LLM OUTPUT] {output[:200]}...")
-
-        return output
-    except Exception as e:
-        log.error(f"[LLM ERROR] {e}")
-        return f"[LLM Error: {e}]"
-
-
-# ==================================================
-# TTS
-# ==================================================
-def tts_save(text):
-    log.info("[TTS] Generating audio output")
-
-    filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_tts.mp3"
-    out_path = os.path.join(UPLOAD_FOLDER, filename)
+def whisper_tts_save(text):
+    """Converts text to audio using gTTS and saves to outputs/audio/whisper/"""
+    filename = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_whisper.mp3"
+    out_path = os.path.join(OUTPUT_WHISPER_DIR, filename)
 
     try:
         gTTS(text=text, lang="en").save(out_path)
-        log.info(f"[TTS DONE] {filename}")
+        log.info(f"[TTS] Whisper audio saved: {filename}")
         return filename
     except Exception as e:
         log.error(f"[TTS ERROR] {e}")
@@ -123,24 +144,25 @@ def index():
     if "docs" not in session:
         session["docs"] = []
 
-    log.info("[PAGE] GET /")
-    return render_template("home.html",
-                           result_text=None,
-                           audio_filename=None,
-                           doc_filenames=session["docs"])
+    return render_template(
+        "home.html",
+        sb_result=None,
+        whisper_result=None,
+        doc_filenames=session["docs"],
+    )
 
 
 @app.route("/", methods=["POST"])
 def run_pipeline():
-    log.info("======= RUN PIPELINE START =======")
+    log.info("======== NEW RUN PIPELINE ========")
 
-    if "docs" not in session:
-        session["docs"] = []
-
+    # --------------------------------------
+    # COLLECT INPUTS
+    # --------------------------------------
     output_type = request.form.get("output_type")
     user_prompt = (request.form.get("prompt_text") or "").strip()
 
-    log.info(f"[MODE] Selected mode = {output_type}")
+    log.info(f"[MODE] {output_type}")
     log.info(f"[USER PROMPT] {user_prompt}")
 
     # -------------------------------
@@ -148,141 +170,200 @@ def run_pipeline():
     # -------------------------------
     audio_filename = None
     uploaded = request.files.get("audio_file")
-    live_file = request.form.get("live_filename")
 
     if uploaded and uploaded.filename:
-        audio_filename = _save_file(uploaded)
-    elif live_file:
-        audio_filename = live_file
+        audio_filename = _save_audio_file(uploaded)
 
-    lang, transcription = None, ""
+    if not audio_filename:
+        return render_template(
+            "home.html",
+            sb_result={"error": "No audio uploaded."},
+            whisper_result=None,
+            doc_filenames=session.get("docs", []),
+        )
 
-    if audio_filename:
-        path = os.path.join(UPLOAD_FOLDER, audio_filename)
-        lang, transcription = transcribe_audio(path)
+    original_path = os.path.join(UPLOAD_AUDIO_DIR, audio_filename)
+    audio_path = convert_to_wav(original_path)
 
-    log.info(f"[ASR RESULT] lang={lang}, text_length={len(transcription)}")
+    if not audio_path:
+        return "Audio conversion failed", 500
 
-    # -------------------------------
+
+    # ==========================================================
+    # STAGE 1 — SPEECHBRAIN (Card 1)
+    # ==========================================================
+    sb_result = run_speechbrain(audio_path)
+
+    # ==========================================================
     # DOCUMENT UPLOADS
-    # -------------------------------
+    # ==========================================================
     new_docs = request.files.getlist("session_docs")
+    if "docs" not in session:
+        session["docs"] = []
 
     for d in new_docs:
         ext = os.path.splitext(d.filename)[1].lower()
         if ext in ALLOWED_DOC_EXT:
-            saved = _save_file(d)
+            saved = _save_doc_file(d)
             session["docs"].append(saved)
-            log.info(f"[DOC UPLOAD] Saved {saved}")
 
     session["docs"] = session["docs"][:MAX_DOCS]
     session.modified = True
 
-    # -------------------------------
-    # OUTPUT MODES
-    # -------------------------------
-    mistral_out = ""
-    output_audio = None
+    # ==========================================================
+    # STAGE 2 — WHISPER + RAG + MISTRAL (Card 2)
+    # ==========================================================
 
-    # 1️⃣ ASR MODE
+    whisper_lang, whisper_asr = transcribe_whisper(audio_path)
+    log.info(f"[WHISPER ASR] {whisper_asr}")
+
+
+    # ==========================================================
+    # ASR MODE → ONLY RETURN WHISPER ASR + AUDIO
+    # ==========================================================
     if output_type == "asr":
-        log.info("[MODE] ASR only")
+        whisper_output_text = whisper_asr.strip()
 
-        result_text = (
-            f"<b>Language:</b> {lang}<br><br>"
-            f"<b>Transcription:</b><br>{transcription}"
+        whisper_audio_file = whisper_tts_save(whisper_output_text)
+
+        whisper_result = {
+            "whisper_asr": whisper_asr.strip(),
+            "whisper_output": whisper_output_text,
+            "whisper_audio_file": whisper_audio_file,
+        }
+
+        return render_template(
+            "home.html",
+            sb_result=sb_result,
+            whisper_result=whisper_result,
+            doc_filenames=session["docs"],
         )
-        output_audio = audio_filename
 
-    # 2️⃣ CLASSIFICATION
+    # ==========================================================
+    # CLASSIFICATION MODE → USE RAG + CLEAN BULLET OUTPUT
+    # ==========================================================
     elif output_type == "classification":
-        log.info("[MODE] Classification")
 
-        messages = [
-            {"role": "system", "content": "You are an audio classifier."},
-            {"role": "user", "content": f"Transcription: {transcription}"}
-        ]
-
-        mistral_out = mistral(messages)
-        output_audio = tts_save(mistral_out)
-
-        result_text = (
-            f"<b>Language:</b> {lang}<br><br>"
-            f"<b>Transcription:</b><br>{transcription}<br><br>"
-            f"<b>Classification:</b><br>{mistral_out}"
+        classification_instruction = (
+            "Return ONLY bullet points (•).\n"
+            "No explanations. No stories. No apologies.\n\n"
+            "Required format:\n"
+            "• Emotion: ...\n"
+            "• Intent: ...\n"
+            "• Category: ..."
         )
 
-    # 3️⃣ GENERATION
+        query_text = f"Transcription:\n{whisper_asr}"
+
+        if user_prompt:
+            query_text += f"\n\nUser Instruction:\n{user_prompt}"
+
+        query_text += f"\n\n{classification_instruction}"
+
+        raw_output = query_rag(
+            query_text,
+            task_type="classification",
+            selected_docs=session.get("docs")
+        )
+
+        whisper_output_text = "\n".join(
+            line.strip()
+            for line in raw_output.splitlines()
+            if line.strip()
+        )
+
+        whisper_audio_file = whisper_tts_save(whisper_output_text)
+
+        whisper_result = {
+            "whisper_asr": whisper_asr.strip(),
+            "whisper_output": whisper_output_text,
+            "whisper_audio_file": whisper_audio_file,
+        }
+
+
+
+    # ==========================================================
+    # GENERATION MODE → CLEAN GENERATIVE OUTPUT
+    # ==========================================================
     elif output_type == "generation":
-        log.info("[MODE] Generation")
 
-        messages = [
-            {"role": "system", "content": "You are a helpful generator assistant."},
-            {"role": "user",
-             "content": f"Transcription: {transcription}\nUser Prompt: {user_prompt}"}
-        ]
-
-        mistral_out = mistral(messages)
-        output_audio = tts_save(mistral_out)
-
-        result_text = (
-            f"<b>Language:</b> {lang}<br><br>"
-            f"<b>Transcription:</b><br>{transcription}<br><br>"
-            f"<b>Generated Output:</b><br>{mistral_out}"
+        clean_instruction = (
+            "Generate the output directly.\n"
+            "No apologies. No meta text. No role labels.\n"
+            "Only the final answer."
         )
 
-    else:
-        result_text = "[ERROR] Invalid output type"
-        log.error("[MODE ERROR] Invalid output type")
+        query_text = f"Transcription:\n{whisper_asr}"
 
-    log.info("======= RUN PIPELINE END =======")
+        if user_prompt:
+            query_text += f"\n\nUser Instruction:\n{user_prompt}"
 
-    return render_template("home.html",
-                           result_text=result_text,
-                           audio_filename=output_audio,
-                           doc_filenames=session["docs"])
+        query_text += f"\n\n{clean_instruction}"
 
+        raw_output = query_rag(
+            query_text,
+            task_type="generation",
+            selected_docs=session.get("docs")
+        )
 
-# ==================================================
-# Remove document
-# ==================================================
-@app.route("/remove_doc", methods=["POST"])
-def remove_doc():
-    idx = int(request.form.get("index", -1))
+        whisper_output_text = raw_output.strip()
 
-    if 0 <= idx < len(session["docs"]):
-        removed = session["docs"].pop(idx)
-        log.info(f"[DOC REMOVE] Removed: {removed}")
+        whisper_audio_file = whisper_tts_save(whisper_output_text)
 
-        session.modified = True
-        return jsonify({"ok": True})
-
-    log.warning("[DOC REMOVE] Invalid index")
-    return jsonify({"ok": False}), 400
+        whisper_result = {
+            "whisper_asr": whisper_asr.strip(),
+            "whisper_output": whisper_output_text,
+            "whisper_audio_file": whisper_audio_file,
+        }
 
 
-# ==================================================
-# Microphone upload endpoint
-# ==================================================
-@app.route("/api/upload", methods=["POST"])
-def upload_blob():
-    f = request.files.get("file")
-    saved = _save_file(f)
-    log.info(f"[MIC UPLOAD] Saved mic audio = {saved}")
-    return jsonify({"filename": saved})
+    # ==========================================================
+    # RENDER PAGE WITH BOTH RESULT CARDS
+    # ==========================================================
+    return render_template(
+        "home.html",
+        sb_result=sb_result,
+        whisper_result=whisper_result,
+        doc_filenames=session["docs"],
+    )
+
 
 
 # ==================================================
 # Serve audio files
 # ==================================================
-@app.route("/media/<path:filename>", endpoint="media")
-def serve_media(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
+@app.route("/media/sb/<filename>")
+def media_sb(filename):
+    return send_from_directory(OUTPUT_WHISPER_DIR.replace("whisper", "speechbrain"), filename)
+
+
+@app.route("/media/whisper/<filename>")
+def media_whisper(filename):
+    return send_from_directory(OUTPUT_WHISPER_DIR, filename)
+
+
+@app.route("/media/uploaded/<filename>")
+def media_uploaded(filename):
+    return send_from_directory(UPLOAD_AUDIO_DIR, filename)
+
+@app.route("/remove_doc", methods=["POST"])
+def remove_doc():
+    idx = int(request.form.get("index", -1))
+
+    if "docs" not in session:
+        session["docs"] = []
+
+    if 0 <= idx < len(session["docs"]):
+        removed = session["docs"].pop(idx)
+        session.modified = True
+        return jsonify({"ok": True})
+
+    return jsonify({"ok": False}), 400
 
 
 # ==================================================
 # RUN
 # ==================================================
 if __name__ == "__main__":
-    log.info("🚀 Server running at http://127.0.0.1:5000")
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    log.info("🚀 Server Running on http://127.0.0.1:5000")
+    app.run(debug=True,use_reloader=False, host="0.0.0.0", port=5000)

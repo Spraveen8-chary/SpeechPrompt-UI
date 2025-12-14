@@ -11,7 +11,13 @@
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 
+_embeddings = None
+
 def get_embedding_function():
-    model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
-    return embeddings
+    global _embeddings
+    if _embeddings is None:
+        _embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
+    return _embeddings
+
