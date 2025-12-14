@@ -483,16 +483,104 @@ input[type="file"]:focus {
 
 /* result card */
 
+/* ======================================================
+   RESULT CARD — FINAL STABLE VERSION (NO VANISH BUG)
+====================================================== */
+
 .result-card {
+  position: relative;
+  overflow: hidden;
+
   margin-top: 16px;
-  opacity: 0.4;
-  transition: opacity 0.25s ease;
-}
+  border-radius: 20px;
 
-.result-card.active {
+  /* Glass background */
+  background: rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+
+  /* Border */
+  border: 1px solid var(--border);
+
+  /* Shadow */
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.25);
+
+  /* Smooth appearance */
   opacity: 1;
+  transition: background 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
 }
 
+/* ---------------------------------------------
+   FIX: Replace XOR-mask neon border with safe glow
+----------------------------------------------*/
+.result-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+
+  border-radius: inherit;
+  pointer-events: none;
+
+  /* Neon border using glow — SAFE */
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 10px var(--accent-soft), 0 0 20px var(--accent);
+  opacity: 0.25;
+
+  /* ALWAYS BEHIND content */
+  z-index: -1;
+}
+
+/* ---------------------------------------------
+   Hover effect (safe, smooth, no vanishing)
+----------------------------------------------*/
+.result-card:hover {
+  background: rgba(255, 255, 255, 0.14);
+  transform: translateY(-2px);
+  box-shadow: 0 22px 46px rgba(0,0,0,0.35),
+              0 0 18px var(--accent-soft);
+}
+
+/* ---------------------------------------------
+   Bullet list
+----------------------------------------------*/
+.bullet-list {
+  list-style: none;
+  margin-top: 12px;
+  padding-left: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bullet-list li::before {
+  content: "• ";
+  color: var(--accent);
+  margin-right: 6px;
+  font-weight: bold;
+}
+
+/* ---------------------------------------------
+   Inner result text box
+----------------------------------------------*/
+.result-text {
+  min-height: 90px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255,255,255,0.35);
+  background: rgba(4,4,16,0.85);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+:root[data-theme="light"] .result-text {
+  background: #ffffff;
+  border-color: rgba(0,0,0,0.18);
+}
+
+
+/* ---------------------------------------------
+   Title + layout
+----------------------------------------------*/
 .result-header {
   display: flex;
   justify-content: space-between;
@@ -500,43 +588,11 @@ input[type="file"]:focus {
   font-size: 13px;
 }
 
-.dot-indicator {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-
-.dot-indicator.live {
-  background: var(--accent);
-  box-shadow: 0 0 14px rgba(125,123,255,0.9);
-}
-
 .result-body {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr);
   gap: 16px;
   align-items: flex-start;
-}
-
-.result-text {
-  min-height: 90px;
-  padding: 10px 11px;
-  border-radius: 12px;
-  border: 1px dashed rgba(255,255,255,0.35);
-  background: rgba(4,4,16,0.9);
-  font-size: 14px;
-}
-
-:root[data-theme="light"] .result-text {
-  background: #f7f7ff;
-  border-color: rgba(0,0,0,0.18);
-}
-
-.result-side {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 .result-title {
